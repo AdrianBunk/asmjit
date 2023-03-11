@@ -19,6 +19,21 @@ ASMJIT_BEGIN_NAMESPACE
 //! Virtual memory management.
 namespace VirtMem {
 
+//! Describes whether instruction cache should be flushed after a write operation.
+enum class CachePolicy : uint32_t {
+  //! Default policy.
+  //!
+  //! In some places this would mean `kFlushAfterWrite` and in some places it would mean `kNeverFlush`. For example
+  //! if it's known that an address has never been used before to execute code
+  kDefault = 0,
+
+  //! Flush instruction cache after a write operation.
+  kFlushAfterWrite = 1,
+
+  //! Avoid flushing instruction cache after a write operation.
+  kNeverFlush = 2
+};
+
 //! Flushes instruction cache in the given region.
 //!
 //! Only useful on non-x86 architectures, however, it's a good practice to call it on any platform to make your
@@ -233,24 +248,40 @@ ASMJIT_API void protectJitMemory(ProtectJitAccess access) noexcept;
 //! in destructor. The purpose of this class is to make writing to JIT memory easier.
 class ProtectJitReadWriteScope {
 public:
+  ASMJIT_NONCOPYABLE(ProtectJitReadWriteScope)
+
+  //! \name Members
+  //! \{
+
   void* _rxPtr;
   size_t _size;
+  CachePolicy _policy;
+
+  //! \}
+
+  //! \name Construction / Destruction
+  //! \{
 
   //! Makes the given memory block RW protected.
-  ASMJIT_FORCE_INLINE ProtectJitReadWriteScope(void* rxPtr, size_t size) noexcept
+  ASMJIT_FORCE_INLINE ProtectJitReadWriteScope(
+    void* rxPtr,
+    size_t size,
+    CachePolicy policy = CachePolicy::kDefault) noexcept
     : _rxPtr(rxPtr),
-      _size(size) {
+      _size(size),
+      _policy(policy) {
     protectJitMemory(ProtectJitAccess::kReadWrite);
   }
-
-  // Not copyable.
-  ProtectJitReadWriteScope(const ProtectJitReadWriteScope& other) = delete;
 
   //! Makes the memory block RX protected again and flushes instruction cache.
   ASMJIT_FORCE_INLINE  ~ProtectJitReadWriteScope() noexcept {
     protectJitMemory(ProtectJitAccess::kReadExecute);
-    flushInstructionCache(_rxPtr, _size);
+
+    if (_policy != CachePolicy::kNeverFlush)
+      flushInstructionCache(_rxPtr, _size);
   }
+
+  //! \}
 };
 
 } // VirtMem

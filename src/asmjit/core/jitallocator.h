@@ -10,6 +10,7 @@
 #ifndef ASMJIT_NO_JIT
 
 #include "../core/globals.h"
+#include "../core/support.h"
 #include "../core/virtmem.h"
 
 ASMJIT_BEGIN_NAMESPACE
@@ -79,6 +80,7 @@ class JitAllocator {
 public:
   ASMJIT_NONCOPYABLE(JitAllocator)
 
+  //! Visible \ref JitAllocator implementation data.
   struct Impl {
     //! Allocator options.
     JitAllocatorOptions options;
@@ -90,8 +92,13 @@ public:
     uint32_t fillPattern;
   };
 
+  //! \name Members
+  //! \{
+
   //! Allocator implementation (private).
   Impl* _impl;
+
+  //! \}
 
   //! \name Construction & Destruction
   //! \{
@@ -171,31 +178,298 @@ public:
   //! \name Alloc & Release
   //! \{
 
-  //! Allocates a new memory block of the requested `size`.
+  //! A memory reference returned by \ref JitAllocator::alloc().
   //!
-  //! When the function is successful it stores two pointers in `rxPtrOut` and `rwPtrOut`. The pointers will be
-  //! different only if `kOptionUseDualMapping` was used to setup the allocator (in that case the `rxPtrOut` would
-  //! point to a Read+Execute region and `rwPtrOut` would point to a Read+Write region of the same memory-mapped block.
-  ASMJIT_API Error alloc(void** rxPtrOut, void** rwPtrOut, size_t size) noexcept;
+  //! Span contains everything needed to actually write new code to the memory chunk it references.
+  class Span {
+  public:
+    //! \name Constants
+    //! \{
+
+    //! Span flags
+    enum class Flags : uint32_t {
+      //! No flags.
+      kNone = 0u,
+
+      //! The process has never executed the region of the span.
+      //!
+      //! If this flag is set on a \ref Span it would mean that the allocator can avoid flushing
+      //! instruction cache after a code has been written to it.
+      kInstructionCacheClean = 0x00000001u
+    };
+
+    //! \}
+
+    //! \name Members
+    //! \{
+
+    //! Address of memory that has Read and Execute permissions.
+    void* _rx = nullptr;
+
+    //! Address of memory that has Read and Write permissions.
+    void* _rw = nullptr;
+
+    //! Size of the span in bytes (rounded up to the allocation granularity).
+    size_t _size = 0;
+
+    //! Pointer that references a memory block maintained by \ref JitAllocator.
+    //!
+    //! This pointer is considered private and should never be used nor inspected outside of AsmJit.
+    void* _block = nullptr;
+
+    //! Span flags.
+    Flags _flags = Flags::kNone;
+
+    //! Reserved for future use.
+    uint32_t _reserved = 0;
+
+    //! \}
+
+    //! \name Accessors
+    //! \{
+
+    //! Returns a pointer having Read & Execute permissions (references executable memory).
+    //!
+    //! This pointer is never NULL if the allocation succeeded, it points to an executable memory.
+    inline void* rx() const noexcept { return _rx; }
+
+    //! Returns a pointer having Read & Write permissions (references writable memory).
+    //!
+    //! Depending on the type of the allocation strategy this could either be:
+    //!
+    //!   - the same address as returned by `rx()` if the allocator uses RWX mapping (pages have all of Read, Write,
+    //!     and Execute permissions) or MAP_JIT, which requires either \ref ProtectJitReadWriteScope or to call
+    //!     VirtMem::protectJitMemory() manually.
+    //!   - a valid pointer, but not the same as `rx` - this would be valid if dual mapping is used.
+    //!   - NULL pointer, in case that the allocation strategy doesn't use RWX, MAP_JIT, or dual mapping. In this
+    //!     case only \ref JitAllocator can copy new code into the executable memory referenced by \ref Addr.
+    //!
+    //! \note If `rw()` returns a non-null pointer it's important to use either VirtMem::protectJitMemory() or
+    //! \ref ProtectJitReadWriteScope to guard the write, because in case of `MAP_JIT` it would temporarily switch
+    //! the permissions of the pointer to RW (that's per thread permissions). if \ref ProtectJitReadWriteScope is
+    //! not used it's important to clear the instruction cache via \ref VirtMem::flushInstructionCache() after the
+    //! write is done.
+    inline void* rw() const noexcept { return _rw; }
+
+    //! Returns size of this span, aligned to the allocator granularity.
+    inline size_t size() const noexcept { return _size; }
+
+    //! Returns span flags.
+    inline Flags flags() const noexcept { return _flags; }
+
+    //! Shrinks this span to `newSize`.
+    //!
+    //! \note This is the only function that is able to change the size of a span, and it's only use case is to
+    //! shrink the span size during \ref JitAllocator::write(). When the writer detects that the span size shrunk,
+    //! it will automatically shrink the memory used by the span, and propagate the new aligned size to the caller.
+    inline void shrink(size_t newSize) noexcept { _size = Support::min(_size, newSize); }
+
+    //! Returns whether \ref rw() returns a non-null pointer.
+    inline bool isDirectlyWritable() const noexcept { return _rw != nullptr; }
+
+    //! \}
+  };
+
+  //! Allocates a new memory span of the requested `size`.
+  ASMJIT_API Error alloc(Span& out, size_t size) noexcept;
 
   //! Releases a memory block returned by `alloc()`.
   //!
   //! \remarks This function is thread-safe.
-  ASMJIT_API Error release(void* rxPtr) noexcept;
+  ASMJIT_API Error release(void* rx) noexcept;
 
-  //! Frees extra memory allocated with `rxPtr` by shrinking it to the given `newSize`.
+  //! Frees extra memory allocated with `rx` by shrinking it to the given `newSize`.
   //!
   //! \remarks This function is thread-safe.
-  ASMJIT_API Error shrink(void* rxPtr, size_t newSize) noexcept;
+  ASMJIT_API Error shrink(Span& span, size_t newSize) noexcept;
 
-  //! Queries information about an allocated memory block that contains the given `rxPtr`.
+  //! Queries information about an allocated memory block that contains the given `rx`, and writes it to `out`.
   //!
-  //! The function returns `kErrorOk` when `rxPtr` is matched and fills `rxPtrOut`, `rwPtrOut`, and `sizeOut` output
-  //! arguments. The returned `rxPtrOut` and `rwPtrOut` pointers point to the beginning of the block, and `sizeOut`
-  //! describes the total amount of bytes this allocation uses - `sizeOut` will always be aligned to the allocation
-  //! granularity, so for example if an allocation was 1 byte and the size granularity is 64, the returned `sizeOut`
-  //! will be 64 bytes, because that's what the allocator sees.
-  ASMJIT_API Error query(void* rxPtr, void** rxPtrOut, void** rwPtrOut, size_t* sizeOut) const noexcept;
+  //! If the pointer is matched, the function returns `kErrorOk` and fills `out` with the corresponding span.
+  ASMJIT_API Error query(Span& out, void* rx) const noexcept;
+
+#if !defined(ASMJIT_NO_DEPRECATED)
+  //! Allocates a new memory block of the requested `size`.
+  ASMJIT_DEPRECATED("Use alloc(Span& out, size_t size) instead")
+  ASMJIT_FORCE_INLINE Error alloc(void** rxPtrOut, void** rwPtrOut, size_t size) noexcept {
+    Span span;
+    Error err = alloc(span, size);
+    *rwPtrOut = span.rw();
+    *rxPtrOut = span.rx();
+    return err;
+  }
+
+  ASMJIT_DEPRECATED("Use shrink(Span& span, size_t newSize) instead")
+  ASMJIT_FORCE_INLINE Error shrink(void* rxPtr, size_t newSize) noexcept {
+    Span span;
+    ASMJIT_PROPAGATE(query(span, rxPtr));
+    return (span.size() > newSize) ? shrink(span, newSize) : Error(kErrorOk);
+  }
+
+  ASMJIT_DEPRECATED("Use query(Span& out, void* rx) instead")
+  ASMJIT_FORCE_INLINE Error query(void* rxPtr, void** rxPtrOut, void** rwPtrOut, size_t* sizeOut) const noexcept {
+    Span span;
+    Error err = query(span, rxPtr);
+    *rxPtrOut = span.rx();
+    *rwPtrOut = span.rw();
+    *sizeOut = span.size();
+    return err;
+  }
+#endif
+
+  //! \}
+
+  //! \name Write Operations
+  //! \{
+
+  typedef Error (ASMJIT_CDECL* WriteFunc)(Span& span, void* userData) ASMJIT_NOEXCEPT_TYPE;
+
+  ASMJIT_API Error write(
+    Span& span,
+    size_t offset,
+    const void* src,
+    size_t size,
+    VirtMem::CachePolicy policy = VirtMem::CachePolicy::kDefault) noexcept;
+
+  ASMJIT_API Error write(
+    Span& span,
+    WriteFunc writeFunc,
+    void* userData,
+    VirtMem::CachePolicy policy = VirtMem::CachePolicy::kDefault) noexcept;
+
+  template<class Lambda>
+  ASMJIT_FORCE_INLINE Error write(
+    Span& span,
+    Lambda&& lambdaFunc,
+    VirtMem::CachePolicy policy = VirtMem::CachePolicy::kDefault) noexcept {
+
+    WriteFunc wrapperFunc = [](Span& span, void* userData) noexcept -> Error {
+      Lambda& lambdaFunc = *static_cast<Lambda*>(userData);
+      return lambdaFunc(span);
+    };
+    return write(span, wrapperFunc, (void*)(&lambdaFunc), policy);
+  }
+
+  //! \}
+
+  //! \name Write Operations with Scope
+  //! \{
+
+  //! \cond INTERNAL
+
+  //! Write scope data.
+  //!
+  //! This is mostly for internal purposes, please use \ref WriteScope instead.
+  struct WriteScopeData {
+    //! \name Members
+    //! \{
+
+    //! Link to the allocator.
+    JitAllocator* _allocator;
+    //! Cache policy passed to \ref JitAllocator::beginWriteScope().
+    VirtMem::CachePolicy _policy;
+    //! Internal flags used by the implementation.
+    uint32_t _flags;
+    //! Internal data used by the implementation.
+    size_t _data[64];
+
+    //! \}
+  };
+
+  //! Begins a write `scope`.
+  //!
+  //! This is mostly for internal purposes, please use \ref WriteScope constructor instead.
+  ASMJIT_API Error beginWriteScope(WriteScopeData& scope, VirtMem::CachePolicy policy = VirtMem::CachePolicy::kDefault) noexcept;
+
+  //! Ends a write `scope`.
+  //!
+  //! This is mostly for internal purposes, please use \ref WriteScope destructor instead.
+  ASMJIT_API Error endWriteScope(WriteScopeData& scope) noexcept;
+
+  //! Flushes accumulated changes in a write `scope`.
+  //!
+  //! This is mostly for internal purposes, please use \ref WriteScope destructor or \ref WriteScope::flush() instead.
+  ASMJIT_API Error flushWriteScope(WriteScopeData& scope) noexcept;
+
+  //! Alternative to `JitAllocator::write(span, offset, src, size)`, but under a write `scope`.
+  //!
+  //! This is mostly for internal purposes, please use \ref WriteScope::write() instead.
+  ASMJIT_API Error scopedWrite(WriteScopeData& scope, Span& span, size_t offset, const void* src, size_t size) noexcept;
+
+  //! Alternative to `JitAllocator::write(span. writeFunc, userData)`, but under a write `scope`.
+  //!
+  //! This is mostly for internal purposes, please use \ref WriteScope::write() instead.
+  ASMJIT_API Error scopedWrite(WriteScopeData& scope, Span& span, WriteFunc writeFunc, void* userData) noexcept;
+
+  //! Alternative to `JitAllocator::write(span. <lambda>)`, but under a write `scope`.
+  //!
+  //! This is mostly for internal purposes, please use \ref WriteScope::write() instead.
+  template<class Lambda>
+  inline Error scopedWrite(WriteScopeData& scope, Span& span, Lambda&& lambdaFunc) noexcept {
+    WriteFunc wrapperFunc = [](Span& span, void* userData) noexcept -> Error {
+      Lambda& lambdaFunc = *static_cast<Lambda*>(userData);
+      return lambdaFunc(span);
+    };
+    return scopedWrite(scope, span, wrapperFunc, (void*)(&lambdaFunc));
+  }
+
+  //! \endcond
+
+  //! Write scope can be used to create a single scope that is optimized for writing multiple spans.
+  class WriteScope : public WriteScopeData {
+  public:
+    ASMJIT_NONCOPYABLE(WriteScope)
+
+    //! \name Construction & Destruction
+    //! \{
+
+    // Begins a write scope.
+    inline explicit WriteScope(JitAllocator* allocator, VirtMem::CachePolicy policy = VirtMem::CachePolicy::kDefault) noexcept {
+      allocator->beginWriteScope(*this, policy);
+    }
+
+    // Ends a write scope.
+    inline ~WriteScope() noexcept {
+      if (_allocator)
+        _allocator->endWriteScope(*this);
+    }
+
+    //! \}
+
+    //! \name Accessors
+    //! \{
+
+    inline JitAllocator* allocator() const noexcept { return _allocator; }
+    inline VirtMem::CachePolicy policy() const noexcept { return _policy; }
+
+    //! \}
+
+    //! \name Operations
+    //! \{
+
+    //! Similar to `JitAllocator::write(span, offset, src, size)`, but under a write scope.
+    inline Error write(Span& span, size_t offset, const void* src, size_t size) noexcept {
+      return _allocator->scopedWrite(*this, span, offset, src, size);
+    }
+
+    //! Similar to `JitAllocator::write(span, writeFunc, userData)`, but under a write scope.
+    inline Error write(Span& span, WriteFunc writeFunc, void* userData) noexcept {
+      return _allocator->scopedWrite(*this, span, writeFunc, userData);
+    }
+
+    //! Similar to `JitAllocator::write(span, <lambda>)`, but under a write scope.
+    template<class Lambda>
+    inline Error write(Span& span, Lambda&& lambdaFunc) noexcept {
+      return _allocator->scopedWrite(*this, span, lambdaFunc);
+    }
+
+    //! Flushes accumulated changes in this write scope.
+    inline Error flush() noexcept {
+      return _allocator->flushWriteScope(*this);
+    }
+
+    //! \}
+  };
 
   //! \}
 
@@ -215,12 +489,8 @@ public:
     //! Allocation overhead (in bytes) required to maintain all blocks.
     size_t _overheadSize;
 
-    inline void reset() noexcept {
-      _blockCount = 0;
-      _usedSize = 0;
-      _reservedSize = 0;
-      _overheadSize = 0;
-    }
+    //! Resets the statistics to all zeros.
+    inline void reset() noexcept { *this = Statistics{}; }
 
     //! Returns count of blocks managed by `JitAllocator` at the moment.
     inline size_t blockCount() const noexcept { return _blockCount; }

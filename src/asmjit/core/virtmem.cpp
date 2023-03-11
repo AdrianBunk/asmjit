@@ -220,15 +220,16 @@ Error releaseDualMapping(DualMapping* dm, size_t size) noexcept {
 
 #endif
 
-// Virtual Memory [Posix]
-// ======================
+// Virtual Memory [Unix]
+// =====================
 
 #if !defined(_WIN32)
 
-// Virtual Memory [Posix] - Utilities
-// ==================================
+// Virtual Memory [Unix] - Utilities
+// =================================
 
 // Translates libc errors specific to VirtualMemory mapping to `asmjit::Error`.
+ASMJIT_MAYBE_UNUSED
 static Error asmjitErrorFromErrno(int e) noexcept {
   switch (e) {
     case EACCES:
@@ -249,6 +250,49 @@ static Error asmjitErrorFromErrno(int e) noexcept {
     default:
       return kErrorInvalidArgument;
   }
+}
+
+ASMJIT_MAYBE_UNUSED
+static MemoryFlags maxAccessFlagsToRegularAccessFlags(MemoryFlags memoryFlags) noexcept {
+  static constexpr uint32_t kMaxProtShift = Support::ConstCTZ<uint32_t(MemoryFlags::kMMapMaxAccessRead)>::value;
+  return MemoryFlags(uint32_t(memoryFlags & MemoryFlags::kMMapMaxAccessRWX) >> kMaxProtShift);
+}
+
+ASMJIT_MAYBE_UNUSED
+static MemoryFlags regularAccessFlagsToMaxAccessFlags(MemoryFlags memoryFlags) noexcept {
+  static constexpr uint32_t kMaxProtShift = Support::ConstCTZ<uint32_t(MemoryFlags::kMMapMaxAccessRead)>::value;
+  return MemoryFlags(uint32_t(memoryFlags & MemoryFlags::kAccessRWX) << kMaxProtShift);
+}
+
+// Returns `mmap()` protection flags from \ref MemoryFlags.
+ASMJIT_MAYBE_UNUSED
+static int mmProtFromMemoryFlags(MemoryFlags memoryFlags) noexcept {
+  int protection = 0;
+  if (Support::test(memoryFlags, MemoryFlags::kAccessRead)) protection |= PROT_READ;
+  if (Support::test(memoryFlags, MemoryFlags::kAccessWrite)) protection |= PROT_READ | PROT_WRITE;
+  if (Support::test(memoryFlags, MemoryFlags::kAccessExecute)) protection |= PROT_READ | PROT_EXEC;
+  return protection;
+}
+
+// Returns maximum protection flags from `memoryFlags`.
+//
+// Uses:
+//   - `PROT_MPROTECT()` on NetBSD.
+//   - `PROT_MAX()` when available on other BSDs.
+ASMJIT_MAYBE_UNUSED
+static inline int mmMaxProtFromMemoryFlags(MemoryFlags memoryFlags) noexcept {
+  MemoryFlags acc = maxAccessFlagsToRegularAccessFlags(memoryFlags);
+  if (acc != MemoryFlags::kNone) {
+#if defined(__NetBSD__) && defined(PROT_MPROTECT)
+    return PROT_MPROTECT(mmProtFromMemoryFlags(acc));
+#elif defined(PROT_MAX)
+    return PROT_MAX(mmProtFromMemoryFlags(acc));
+#else
+    return 0;
+#endif
+  }
+
+  return 0;
 }
 
 static void getVMInfo(Info& vmInfo) noexcept {
@@ -274,15 +318,6 @@ static int getOSXVersion() noexcept {
   return ver;
 }
 #endif // __APPLE__ && TARGET_OS_OSX
-
-// Returns `mmap()` protection flags from \ref MemoryFlags.
-static int mmProtFromMemoryFlags(MemoryFlags memoryFlags) noexcept {
-  int protection = 0;
-  if (Support::test(memoryFlags, MemoryFlags::kAccessRead)) protection |= PROT_READ;
-  if (Support::test(memoryFlags, MemoryFlags::kAccessWrite)) protection |= PROT_READ | PROT_WRITE;
-  if (Support::test(memoryFlags, MemoryFlags::kAccessExecute)) protection |= PROT_READ | PROT_EXEC;
-  return protection;
-}
 
 // Virtual Memory [Posix] - Anonymus Memory
 // ========================================
@@ -569,39 +604,6 @@ static inline int mmMapJitFromMemoryFlags(MemoryFlags memoryFlags) noexcept {
 #endif
 }
 
-ASMJIT_MAYBE_UNUSED
-static MemoryFlags maxAccessFlagsToRegularAccessFlags(MemoryFlags memoryFlags) noexcept {
-  static constexpr uint32_t kMaxProtShift = Support::ConstCTZ<uint32_t(MemoryFlags::kMMapMaxAccessRead)>::value;
-  return MemoryFlags(uint32_t(memoryFlags & MemoryFlags::kMMapMaxAccessRWX) >> kMaxProtShift);
-}
-
-ASMJIT_MAYBE_UNUSED
-static MemoryFlags regularAccessFlagsToMaxAccessFlags(MemoryFlags memoryFlags) noexcept {
-  static constexpr uint32_t kMaxProtShift = Support::ConstCTZ<uint32_t(MemoryFlags::kMMapMaxAccessRead)>::value;
-  return MemoryFlags(uint32_t(memoryFlags & MemoryFlags::kAccessRWX) << kMaxProtShift);
-}
-
-// Returns maximum protection flags from `memoryFlags`.
-//
-// Uses:
-//   - `PROT_MPROTECT()` on NetBSD.
-//   - `PROT_MAX()` when available(BSD).
-ASMJIT_MAYBE_UNUSED
-static inline int mmMaxProtFromMemoryFlags(MemoryFlags memoryFlags) noexcept {
-  MemoryFlags acc = maxAccessFlagsToRegularAccessFlags(memoryFlags);
-  if (acc != MemoryFlags::kNone) {
-#if defined(__NetBSD__) && defined(PROT_MPROTECT)
-    return PROT_MPROTECT(mmProtFromMemoryFlags(acc));
-#elif defined(PROT_MAX)
-    return PROT_MAX(mmProtFromMemoryFlags(acc));
-#else
-    return 0;
-#endif
-  }
-
-  return 0;
-}
-
 static HardenedRuntimeFlags getHardenedRuntimeFlags() noexcept {
   HardenedRuntimeFlags flags = HardenedRuntimeFlags::kNone;
 
@@ -743,7 +745,7 @@ Error allocDualMapping(DualMapping* dm, size_t size, MemoryFlags memoryFlags) no
   dm->rw = ptr[1];
   return kErrorOk;
 #else
-  #error "[asmjit] VirtMem::allocDualMapping() has no implementation"
+  #error "[asmjit] VirtMem::allocDualMapping() doesn't have implementation for the target OS and compiler"
 #endif
 }
 
