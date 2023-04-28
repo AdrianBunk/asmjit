@@ -17,7 +17,7 @@
 using namespace asmjit;
 
 #define TEST_INSTRUCTION(OPCODE, ...) \
-  tester.testInstruction(OPCODE, #__VA_ARGS__, tester.assembler.__VA_ARGS__)
+  tester.testValidInstruction(#__VA_ARGS__, OPCODE, tester.assembler.__VA_ARGS__)
 
 static void ASMJIT_NOINLINE testX64AssemblerBase(AssemblerTester<x86::Assembler>& tester) noexcept {
   using namespace x86;
@@ -754,12 +754,15 @@ static void ASMJIT_NOINLINE testX64AssemblerBase(AssemblerTester<x86::Assembler>
   TEST_INSTRUCTION("486BC901"                      , imul(rcx, 1));
   TEST_INSTRUCTION("480FAF8C1A80000000"            , imul(rcx, ptr(rdx, rbx, 0, 128)));
   TEST_INSTRUCTION("480FAF8C1A80000000"            , imul(rcx, qword_ptr(rdx, rbx, 0, 128)));
+  TEST_INSTRUCTION("666BC901"                      , imul(cx, cx, 1));
   TEST_INSTRUCTION("666BCA01"                      , imul(cx, dx, 1));
   TEST_INSTRUCTION("666B8C1A8000000001"            , imul(cx, ptr(rdx, rbx, 0, 128), 1));
   TEST_INSTRUCTION("666B8C1A8000000001"            , imul(cx, word_ptr(rdx, rbx, 0, 128), 1));
+  TEST_INSTRUCTION("6BC901"                        , imul(ecx, ecx, 1));
   TEST_INSTRUCTION("6BCA01"                        , imul(ecx, edx, 1));
   TEST_INSTRUCTION("6B8C1A8000000001"              , imul(ecx, ptr(rdx, rbx, 0, 128), 1));
   TEST_INSTRUCTION("6B8C1A8000000001"              , imul(ecx, dword_ptr(rdx, rbx, 0, 128), 1));
+  TEST_INSTRUCTION("486BC901"                      , imul(rcx, rcx, 1));
   TEST_INSTRUCTION("486BCA01"                      , imul(rcx, rdx, 1));
   TEST_INSTRUCTION("486B8C1A8000000001"            , imul(rcx, ptr(rdx, rbx, 0, 128), 1));
   TEST_INSTRUCTION("486B8C1A8000000001"            , imul(rcx, qword_ptr(rdx, rbx, 0, 128), 1));

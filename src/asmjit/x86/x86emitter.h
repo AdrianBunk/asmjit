@@ -471,7 +471,6 @@ public:
   ASMJIT_INST_3x(idiv, Idiv, Gp, Gp, Mem)                              // ANY [EXPLICIT] xDX[Rem]:xAX[Quot] <- xDX:xAX / m16|m32|m64
   ASMJIT_INST_2x(imul, Imul, Gp, Gp)                                   // ANY [EXPLICIT] AX <- AL * r8 | ra <- ra * rb
   ASMJIT_INST_2x(imul, Imul, Gp, Mem)                                  // ANY [EXPLICIT] AX <- AL * m8 | ra <- ra * m16|m32|m64
-  ASMJIT_INST_2x(imul, Imul, Gp, Imm)                                  // ANY
   ASMJIT_INST_3x(imul, Imul, Gp, Gp, Imm)                              // ANY
   ASMJIT_INST_3x(imul, Imul, Gp, Mem, Imm)                             // ANY
   ASMJIT_INST_3x(imul, Imul, Gp, Gp, Gp)                               // ANY [EXPLICIT] xDX:xAX <- xAX * r16|r32|r64
@@ -630,6 +629,14 @@ public:
   ASMJIT_INST_2x(xor_, Xor, Gp, Imm)                                   // ANY
   ASMJIT_INST_2x(xor_, Xor, Mem, Gp)                                   // ANY
   ASMJIT_INST_2x(xor_, Xor, Mem, Imm)                                  // ANY
+
+  //! \}
+
+  //! \name Core Instructions (Aliases)
+  //! \{
+
+  //! The `imul(Gp, Imm)` instruction is an alias of `imul(Gp, Gp, Imm)` instruction.
+  inline Error imul(const Gp& o0, const Imm& o1) { return _emitter()->_emitI(Inst::kIdImul, o0, o0, o1); }
 
   //! \}
 
